@@ -1,6 +1,9 @@
 use std::collections::BinaryHeap;
 use std::time::SystemTime;
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 /// Zero latency jitter buffer for real time udp/rtp streams
 pub struct JitterBuffer<P, const S: u8>
 where
@@ -38,10 +41,10 @@ where
         }
 
         if let Some(last_seq) = self.last_seq {
-            if last_seq >= packet.sequence_number().into() {
+            if last_seq >= packet.sequence_number() {
                 #[cfg(feature = "log")]
                 log::warn!(
-                    "discarded packet {} since newer packet was already played back",
+                    "discarded packet {:?} since newer packet was already played back",
                     packet.sequence_number()
                 );
 
@@ -52,11 +55,11 @@ where
         if self
             .heap
             .iter()
-            .any(|p| p.sequence_number == packet.sequence_number().into())
+            .any(|p| p.sequence_number == packet.sequence_number())
         {
             #[cfg(feature = "log")]
             log::warn!(
-                "discarded packet {} since its already buffered",
+                "discarded packet {:?} since its already buffered",
                 packet.sequence_number()
             );
 
@@ -67,12 +70,10 @@ where
             // SAFETY: we checked that we have at least one packet in the heap
             let max_seq = self.heap.iter().max().unwrap().sequence_number;
 
-            if SequenceNumber(max_seq.0.overflowing_add(S as u16).0)
-                < packet.sequence_number().into()
-            {
+            if SequenceNumber(max_seq.0.overflowing_add(S as u16).0) < packet.sequence_number() {
                 #[cfg(feature = "log")]
                 log::warn!(
-                    "unexpectedly received packet {} which is too far ahead (over {S} packets) of current playback window, clearing jitter buffer",
+                    "unexpectedly received packet {:?} which is too far ahead (over {S} packets) of current playback window, clearing jitter buffer",
                     packet.sequence_number()
                 );
 
@@ -81,7 +82,7 @@ where
         }
 
         #[cfg(feature = "log")]
-        log::debug!("pushed packet {} onto heap", packet.sequence_number());
+        log::debug!("pushed packet {:?} onto heap", packet.sequence_number());
         self.heap.push(packet.into());
     }
 
@@ -140,12 +141,12 @@ where
             None
         };
 
-        self.last_seq = Some(SequenceNumber(
+        self.last_seq = Some(
             packet
                 .as_ref()
                 .map(|p| p.sequence_number())
-                .unwrap_or_else(|| u16::from(last_seq).wrapping_add(1)),
-        ));
+                .unwrap_or_else(|| u16::from(last_seq).wrapping_add(1).into()),
+        );
 
         #[cfg(feature = "log")]
         log::debug!(
@@ -220,7 +221,7 @@ impl<P: Packet, const S: u8> Default for JitterBuffer<P, S> {
 
 /// A packet which should be reordered and managed by the jitter buffer
 pub trait Packet: Unpin + Clone {
-    fn sequence_number(&self) -> u16;
+    fn sequence_number(&self) -> SequenceNumber;
 }
 
 #[derive(Debug, Clone)]
@@ -248,7 +249,7 @@ where
 {
     fn from(raw: P) -> Self {
         Self {
-            sequence_number: raw.sequence_number().into(),
+            sequence_number: raw.sequence_number(),
             yielded_at: None,
             raw: Some(raw),
         }
@@ -291,8 +292,9 @@ where
 /// for wrapping sequence number handling
 ///
 /// The accepted wrapping window is set to 16 numbers
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SequenceNumber(u16);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct SequenceNumber(pub u16);
 
 impl SequenceNumber {
     const WRAPPING_WINDOW_SIZE: u16 = 16;
@@ -353,8 +355,8 @@ mod tests {
 
     impl Packet for Rtp {
         #[inline]
-        fn sequence_number(&self) -> u16 {
-            self.seq
+        fn sequence_number(&self) -> SequenceNumber {
+            SequenceNumber(self.seq)
         }
     }
 
