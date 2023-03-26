@@ -6,7 +6,7 @@ pub struct JitterBuffer<P, const S: u8>
 where
     P: Packet,
 {
-    last: Option<JitterPacket<P>>,
+    last_seq: Option<SequenceNumber>,
     heap: BinaryHeap<JitterPacket<P>>,
 }
 
@@ -17,7 +17,7 @@ where
     /// Create a new jitter buffer
     pub fn new() -> Self {
         Self {
-            last: None,
+            last_seq: None,
             heap: BinaryHeap::with_capacity(S as usize),
         }
     }
@@ -31,14 +31,14 @@ where
             while self.heap.len() >= S as usize && !self.heap.is_empty() {
                 // SAFETY: We just checked the length is greater or equal to 1
                 let dropped = self.heap.pop();
-                self.last = None;
+                self.last_seq = None;
                 #[cfg(feature = "log")]
                 log::warn!("dropping packet: {:?}", dropped.map(|p| p.sequence_number));
             }
         }
 
-        if let Some(ref last) = self.last {
-            if last.sequence_number >= packet.sequence_number().into() {
+        if let Some(last_seq) = self.last_seq {
+            if last_seq >= packet.sequence_number().into() {
                 #[cfg(feature = "log")]
                 log::warn!(
                     "discarded packet {} since newer packet was already played back",
@@ -95,15 +95,15 @@ where
             return None;
         }
 
-        let last = match self.last {
-            Some(ref last) => last.to_owned(),
+        let last_seq = match self.last_seq {
+            Some(last) => last,
             None => {
                 // SAFETY:
                 // we checked that the heap is not empty so at least one
                 // element must be present or the std implementation is flawed.
                 let mut packet = self.heap.pop().unwrap();
                 packet.yielded_at = Some(SystemTime::now());
-                self.last = Some(packet.clone());
+                self.last_seq = Some(packet.sequence_number);
 
                 #[cfg(feature = "log")]
                 log::debug!(
@@ -126,7 +126,7 @@ where
             }
         };
 
-        let packet = if next_sequence == (u16::from(last.sequence_number).wrapping_add(1)).into() {
+        let packet = if next_sequence == (u16::from(last_seq).wrapping_add(1)).into() {
             match self.heap.pop() {
                 Some(packet) => packet.into(),
                 None => {
@@ -140,20 +140,17 @@ where
             None
         };
 
-        self.last = Some(JitterPacket {
-            raw: packet.clone(),
-            sequence_number: packet
+        self.last_seq = Some(SequenceNumber(
+            packet
                 .as_ref()
                 .map(|p| p.sequence_number())
-                .unwrap_or_else(|| u16::from(last.sequence_number).wrapping_add(1))
-                .into(),
-            yielded_at: Some(SystemTime::now()),
-        });
+                .unwrap_or_else(|| u16::from(last_seq).wrapping_add(1)),
+        ));
 
         #[cfg(feature = "log")]
         log::debug!(
             "packet {:?} yielded, {} remaining",
-            self.last.as_ref().map(|l| l.sequence_number),
+            self.last_seq.map(|s| s.0),
             self.heap.len()
         );
 
@@ -166,9 +163,9 @@ where
     /// If there are a lot of packets available for playback without packet loss
     /// it is pointless to keep them in the buffer.
     pub fn lossless_packets_buffered(&self) -> usize {
-        match self.last {
-            Some(ref last) => {
-                let mut last = last.sequence_number;
+        match self.last_seq {
+            Some(last_seq) => {
+                let mut last_seq = last_seq;
                 let mut count = 0;
 
                 let sequence_numbers = self.heap.clone().into_sorted_vec();
@@ -185,14 +182,14 @@ where
                     log::info!(
                         "is next of: {:?} {:?} = {}",
                         packet,
-                        last,
-                        packet.is_next_of(last)
+                        last_seq,
+                        packet.is_next_of(last_seq)
                     );
 
-                    if packet.is_next_of(last) {
+                    if packet.is_next_of(last_seq) {
                         #[cfg(feature = "log")]
-                        log::debug!("{:?} is next of {:?}", packet, last);
-                        last = packet;
+                        log::debug!("{:?} is next of {:?}", packet, last_seq);
+                        last_seq = packet;
                         count += 1;
                     } else {
                         break;
@@ -210,7 +207,7 @@ where
 
     /// Drops all packets in the jitter buffer
     pub fn clear(&mut self) {
-        self.last = None;
+        self.last_seq = None;
         self.heap.clear();
     }
 }
